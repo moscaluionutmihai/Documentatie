@@ -1,0 +1,1792 @@
+
+	KillrVideo Introduction
+
+* This is an example application which will be used for this course
+  KillrVideo is a video sharing website	
+	
+* This applicaions contains Users, Videos (object of users), comments on videos (metadata) ...etc	
+
+* Problems KillrVideos faces
+ - Scalability - KillrVideo constantly adds users videos
+   > Website could need to scale a lot and with Cassandra is easy to just add additional nodes
+ - Reliability - KillrVideo must always be available
+ - Ease of use - KillrVideo must be easy to manage and maintain
+
+
+* Solutions Attempted
+ - Relational Database Problems
+  > Single points of failure
+  > Scaling complexity
+  > Reliability issues
+  > Difficult to serve users worldwide
+
+
+* KillrVideo and Cassandra
+ - Why Cassandra
+  > Peers instead of master/slave
+  > Linear scale performance
+  > Always on reliability
+  > Data can be stored geographically close to clients
+
+
+_________________________________________________________________________________
+
+
+
+	Bootstrapping a Node into a Cluster
+
+- BOOTSTRAPPING -> Adding a node to a cluster
+
+- You might want to considering adding a node to a cluster if you have:
+  * Reached data capacity problem  (horizontal scalability)
+   > Your data has outgrown the node's hardware capacity
+   
+  * Reached traffic capacity
+   > Your application needs more rapid response with less latency
+   
+  * You need more operational headroom
+   > Need more resources for node repair, compaction and other resource intensive operations
+
+
+- Adding a node: Best practices
+  * Single-token Nodes
+   > Double the size of a cluster (single-token node)
+   > Hard to do because we have to split out the token ranges in order to assign it to the new node
+   
+  * Vnodes
+   > For vnodes clusters, we have an increment the size of the cluster if more nodes are needed 
+  
+
+  * !!! Wait a period a time before adding each additional node (single-token and vnodes)
+  * !!! Follow the '2 minute rule' -> this ensures the range announcement is known to all nodes before the next one begging entering the cluster  
+
+
+- Node Setup
+  * There are 4 main parameters of a node for bootstrapping
+   (these are configured in cassandra.yaml file)
+   > cluster_name
+   
+   > rpc_address  (The listen address for client connections.  -  0.0.0.0:Listens on all configured interfaces, but you must set the broadcast_rpc_address to a value other than 0.0.0.0.)   - USED FOR THRIFT, see below: Thrift: a legacy RPC protocol combined with a code generation tool. Deprecated in favor of the native protocol.
+      
+
+   > listen_address ( The IP address or hostname that Cassandra binds to for connecting to other Cassandra nodes; !!!! don't use 0.0.0.0)
+  
+   > -seeds (list of servers that are running in the cluster)
+
+
+
+- Bootstrapping
+ !!! * Bootstrapping in Cassandra is a simple but critical proces (can be a long running process) node announces itself to the ring using seed nodes
+
+
+
+- The Bootstrapping Process
+ * Calculate range(s) of a new node, notify ring of these pending ranges
+ * Calculate the node(s) that currently own these ranges and will no longer own them once the bootstrap completes
+ * Stream the data from these nodes to the bootstrapping node (monitor with nodetool netstats)  - Node is in JOINING state
+ * Join the new node to the ring so it can serve traffic
+ * Length of time it takes to join depends on the amount of data to be streamed
+
+- What if bootstrap fails (two scenarios)
+ * Bootstrapping node could not even connect to the cluster
+  > Fairly easy to deal with
+  > Something fundamental like couldn't find cluster
+  > Examine the log file to understand what's on firstly (what types of things, error conditions it should be flagged as soo in process, if bootstrap) change config and try again
+  
+ * Streaming portion fails
+  > node exists in the cluster in joining state>
+  > nodetool rebuild to rebootstrap
+  
+  
+
+- Nodetool Cleanup
+ * Perform cleanup after bootstrap on the OTHER NODES (you don;t have to do this necessarly)
+ * Reads all the SSTables to make sure there is no token out of range for that particular node
+ * If it's out or range it just does a copy
+ * If you don't run clean up, will get picked up through compaction over time
+
+ * What nodetool cleanup does is just copies the initial SSTable from the node into a new one, all the our of range tokens are dropped 
+
+
+ * The nodetool cleanup command cleans up all data in a keyspace and all table(s) that are specified (will clean up all keyspaces if no keyspace is specified)
+#bin/nodetool [options] cleanup -- <keyspace> (<table>)
+   > use flags to specyfy
+    -h   (host | IP address)
+	-p   (port)
+    -pw  (password)
+	-u   (username)
+
+______________________________________________________________________________
+
+
+
+	Removing a Node
+
+- Why would I remove a node (we are going to work with two scenarios)
+ 1. You're going to reduce the capacity, need to decommision (or some sort of operational requirement)
+ 2. The node is offline and will never come back online
+
+- Removing a live node from a cluster
+ * Perhaps you want to decrease the size of your cluster (or you might want to swap an older machine)
+ * Decommissioning a node will assign the ranges of the old node to the other nodes and replicate the appropiate data to the new nodes
+ 
+ * Decommissioned node's data will be streamed from the node itself (will go into LEAVING status -> no longer accept writes + data stream to other nodes)
+ * Once data has been moved to other nodes, the process for removing or replacing is similar for both (once completes that node will be down for good, only way to bring it up is to re bootstrapp it)
+
+ * Node is marked as "LEAVING" and will stream data to other live nodes
+ * The data directories will still exist - remove these fir the node will go back in production
+
+- When a node is decommissioned 
+ * The Casssandra JVM is still running - but with Gossip, Thrift and all Native transport ports down.
+ * This allows admin to hook up a JMX client to analize the metrics maintained in the JVM (after this, you have to kill the JVM and it will never come back uless rebootstrapped)
+ 
+ 
+- Decommission a node using nodetool
+#bin/nodetool [options] decommission (removes node specified by host id)
+
+ * Flags
+	-h host
+	-p port
+	-pw password
+	-u username
+
+!!!!!
+#nodetool netstats (monitor the progress) 
+!!!!!	
+
+
+- Before doing anything, check if the node can be removed
+
+!!!!!
+#bin/nodetool status
+!!!!!
+
+ * If the node us not UN  (Up/Normal) and is down (AND NOT COMMING UP), we have to remove it using a different command - this command will let the other nodes know that this node will never come back online and it will recalculate all token ranges
+#bin/nodetool [options] removenode [host id] (adjust your toens to avoid creating a hot spot using a single-token nodes; host id can be retrieved using nodetool status command)
+
+
+
+* If the nodetool removenode fails, you may use the command below
+#bin/nodetool assassinate 
+
+* Repair should be executed once the node is removed from the cluster
+#bin/nodetool repair
+
+
+
+- Keep in mind that all the steps above are for permanently removing a node, NOT gracefully shutdown
+
+
+
+______________________________________________________________________________
+
+	Replace a Downed Node
+	
+- The pros of replacing a downed node
+ * You don't have to move the data twice
+ * Backup for a node will work for a replaced node because same tokens are used to bring the replaced node into the cluster
+ * Faster than bootstrapping
+
+
+- Replacng a node using nodetool command
+ 1. First, find the ip address of the down node using #nodetool status command
+ 2. In the node, open the cassamdra-env.sh
+ 3. Swap in the IP address of the dead node as the replace value address in the JVM option. This will enable bootstrapping of the new node (when it comes back online it will assume the position of that down node)
+ 
+
+- To replace that down node, we will have to use the #nodetool removenode command to remove that node completly
+ #nodetool removenode
+ 
+ #nodetool assasinate (use the force option if necessary)
+
+ #nodetool netstats (monitor the process)
+
+
+
+
+- What if the node (IP address included in cassandra.yaml file on other servers) was a also a seed node, you will need to add that new IP to the cassandra.yaml files and REMOVE the old IP address(IP of previous node) to avoid issues in future.
+ * Considerations:
+  > Need to add to list of seeds in cassandra.yaml
+  > Cassandra will not allow seed node to autoboot. Thus, will have to run repair on new seed node to do so !!!!!!
+
+ * Steps:
+  1. Add a new node making the necessary changes in cassandra.yaml file
+  2. Specify new seed node in cassandra.yaml file
+  3. Start cassandra on new seed node
+  4. Run #nodetool repair on the new seed node to manually bootstrap
+  5. Remove the old seed node using #nodetool removenode with host ID of the downed node
+  6. Run #nodetool cleanup on previously existing nodes
+
+
+______________________________________________________________________________
+
+	
+	What is a repair
+
+- Repair (a way to check consistency) is a deliberate action to cpe with cluster entropy
+ * Entropy can arise from nodes that were down longer than the hint window, dropped mutations or another causes
+ * A repair operates on all of the nodes in a replica set by default
+ * Ensures that all replicas have identical copies of a given partition
+ 
+ * Consists of two phases:
+  1. Build a Merkle tree of the data per partition
+  2 Replicas then compare the differences between their trees and stream the differences to each other as needed
+
+1) Merkle tree (allows for the detection of any changes beteen data volumes ) exhange
+ * Start with the root of the tree ( a list of one hash value )
+ * The origin sends the list of hashes at the current level
+ * The destination diffs the list of hashes agains its own, then requests subtrees that are different
+ * If there are no differences, the request can terminate
+ * Repeat steps 2 and 3 until leaf nodes are reached
+ * The origin sends the values of the keys in the resulting set
+ 
+
+- Why is repair necessary ?
+ * A nodse's data can get inconsistent over time ( Repair is only a maintenance action is this case )
+ * If a node goes down for some time, it misses writes and will need to catch up
+ * Sometimes is best to repair a node:
+  > If the node has been down longer than the length specified in "max_hint_window_in_ms", the node is out of sync  (hints are hold 3h by default)
+  > Depending on amount of data, might be faster to repair
+  
+ * Sometimes it is better to bring the node back as a new node
+  > If there is a significant amount of data, might be faster just to bring in a new node and stream data just to that node ( a repair is represents much more work to do, a bootstrap will just stream some data but CPU resources will be lower)
+  
+
+
+- Incremental Repairs (will only repair new data, if the old data was repaired -> it will not repair it again because SSTables are immutable)
+ * To avoid the needed for constant tree construction, incremntal repairs have been introduced
+  > Idea is to persiste already repaired data, and only recalculate Merkle trees or SSTables that haven't previouslt undergone repairs
+  > This allows the repair process to stay performant and lightweight
+  
+  Regular repairs 									Incremental repairs
+  [All sstables] -> one  big merkle tree		[unrepaired sstables] -> lower merkle tree
+
+
+
+ * Incremental repairs begin with th repair leader sending repair messages to its peers
+ * Each node biolds a Merkle tree from the unrepaired SStable metadata 
+  > this can be distinguished by the repairedAt field in each SSTable metadata 
+
+ * Once the leader receives a mergle tree from each node, it compares the trees and issues streaming requests (classic repair case !!!)
+ 
+ * Finally the leader issues anticompaction command
+  > Anticompaction is the process of segregating repaired and unrepaired ranges into separate SSTables
+  > Repaired SSTables are written a new repairAt denotating the time of the repair
+
+
+- What are best practices for repair ?
+ * Run repair weekly
+ * Run repair on a small number of nodes at the time
+ * Schedule for low usage hours
+ * Run repair on a partition or subrange of a partition
+
+
+- Kind of repairs to run
+ * Primary range (inside ring) --"first" node that data is stored on based on partition key
+ * Secondary range (outside rings) --additional replicas of the same data
+ 
+- Impact of range on best practices
+ #nodetool repair --partitioner-range  (repair the range of data of a node; if you run a PR "Primary Range" .. you will have to run it on every single node to ensure consistency => This is called "ROLLING REPAIR")
+ * Repairs only the primary range of a node
+ * Otherwise, a repair job can take 2-3 times longer, depending on the number of replicas
+ 
+ #nodetool --start-token <token> --end-token <token>
+ * Repairs only a portion of data belonging to a node
+ * Markle tree precision fixed, so many partitions/node will result in overstreaming
+ * Important for repairing single-token nodes
+
+
+
+- Perform a repair using nodetool
+ #nodetool <options> repair
+ 
+ * Options:
+  --dc <dc_name>   					 - identity of datacenters
+  --et <end_token>  				 - used when repairing a subrange
+  --local         					 - repair only in the local data center
+  --par   	(paralel repair)
+  --pr  	(partitioner-range) 	 - repairs only the Primary Range
+  --st  	(start token)			 - used when repairing a subrange
+  - <keyspace> <table>
+  -- inc    (incremental)			 - do an incremental repair
+
+ (if no option is specified => SEQUENTIAL REPAIR)
+
+
+______________________________________________________________________________
+
+
+
+	Dividing SSTables with sstablesplit
+
+
+- When do we need a sstablesplit ?
+ * You did a nodetool compact (major compaction)
+ * Maybe you used SizeTieredCompactionStrategy (compacts every SSTable into one SSTable) for a major compaction
+ * This would result in a excessively large SSTable
+ * Good Idea to split the table because won't get compacted again until the next huge compaction
+ * Using size tiered compaction, we may have gotten some really large files over time
+ * May find yourself with a 200GB file that you need to split up
+ * It's and anti-compaction in a way
+ 
+ * !!! A big SSTable file will no be joined with the newer SSTables => you will suck up all disk resources over time
+ 
+ 
+- Usage 
+ 1. Firstly, Cassandra must be stopped on the node(!!!) to use this tool -> Do this online and will be BAD
+  #sudo service cassandra stop  (or kill the cassandra process...etc.)
+
+ 2. Usage of #sstablesplit command
+  #sstablesplit [options] <filename> [<filename>]..... *
+
+  * Options:
+   --debug         		- Displays stack traces
+   --help  (-h)	   		- Displays help
+   --no-snapshot   		- Do not snapshot the SSTables before splitting
+   --size <size>  (s) 	- Maximum size in MB for the output SSTables  (default 50)
+   --verbose (-v)		- Verbose output
+  
+  * Example (!!!!!!!)
+  #sstablesplit -s 40 /var/lib/cassandra/data/data/killrvideo/users/*    (Splits all the SSTables in the killrvideo KEYSPACE and users TABLE into files of sive 40MB)
+
+
+______________________________________________________________________________
+
+
+	Creating Snapshots
+	
+
+- Why should we backup our data
+ * Programmatic accidental deletion or overwriting
+ * For single node failure, recovery can be from a live replica
+ * So that we may recover from catastropic data center failure
+
+
+- Why snapshots  
+ * We don't do backups like a traditional database where we copy out all the data
+ * It's a distributed system; every server or node has a portion (snapshot) of the data
+ * SSTables are immutable, which is great!!! Makes them easy to back up
+
+
+- What are snapshots
+ * Snapshots create hardlinks on the file system as opposed to copying data 
+   (This is DIFFERENT thank copying actual data file offline and take less disk space)
+   (so you are just switching a inode pointer, which is very fast)
+   
+ * Therefore very fast, becaust you are  just copying a pointer !!! (Not a lot of data in flight)
+ 
+ 
+ * Represents the state of the data files at a particular point in time
+ * Can consist of a single table, single keyspace, or multiple keyspaces, entire cluster..
+
+ (As compared #mv with #cp  -> #mv is very fast because you are just copying a pointer as oposed to #cp wich is actually writing the disk again)
+
+
+
+- What is a snapshot (snapshot is an SSTable)
+ * Represents the state of the data files at a particular point in time
+ * Snapshot directory is created (this has only  pointers to the original file) => If you leave it there is NOT gonna use so much space, if you want to copy it on NFS..etc., then you will take the data which is pointed to (will take more some time because you are taking data)
+ * Then you can either leave it or copy it offline to an NFS mount or S3...
+
+
+
+- How do incremental backups work ?
+ * Incremental backups create a hard link to every SSTable upon FLUSH (SSTable FLUSH not memtable)
+  > User must manually delete them after creating a new snapshot
+ 
+ * Incremental backups are disabled by default
+  > Configured in the cassandra.yaml file by setting "incremental_backups" to "true"
+
+ * Need a snapshot before taking incremental backups (a full backup in order to do incremental)
+ 
+ * Snapshot information is stored in a "snapshots" directory under each table directory
+  > Snapshots need only be stored once offsite
+
+ * Is an internal feature of cassandra, whenever a new SSTable is FLUSHED, it will snapshot it as well
+
+
+
+ * Incremental backups are all stored in backups directory under the keyspace data directory (just like the other snapshots)
+  > Enables storing increental backups offsite more easily
+  
+ * Both snapshot and incremntals are needed to restore data
+ 
+ * Incremental backup files are not automatically cleared
+  > Clear when a new snapshot is created
+
+
+
+- Where are snapshots stored ?
+ * Snapshots and incremental backups are stored on each Cassandra node
+  > Handy, if a simple restore is needed ( JUST COPY THE FILES BACK INTO THE DATA DIRECTORY => GOOD TO GO !!!!)
+  > not so good if there is a hardware failure
+  
+ * Commonly, files are copied to an off-node location
+  > Open source program, tablesnap, is usefull for backing up to an S3 (S3=cheap storage)
+  
+ * Scripts can be used to automate backing up files to another machine
+  > cron + bash script, rsync,etc...
+
+
+
+- Auto snapshot  
+ * CRITICAL sfety factor !!! (do not turn this off)
+ * A configuration setting in cassandra.yaml that indicates whether or not a snapshot is taken of data before tables are truncated and tables and keyspaces are dropped
+ * STRONGLE advise using the default setting of TRUE
+
+ * IF YOU TRUNCATE A TABLE OR DROP A KEYSPACE -> CASSANDRA WILL AUTOMATICALLY DO A SNAPSHOT BEFORE
+
+
+
+
+- How do we use nodetool to create snapshots ( can be executed on a particular node )
+#bin/nodetool [options] snapshot (-cf <table> | -t <tag> -- keyspace)
+
+ * We can specify to take a snapshot of:
+  > one or more keyspaces
+  > a table specified to backup data
+  > everything (most of the cases)
+  
+ * Flags
+  > -h [host] [IP address]
+  > -p port
+  > -pw password
+  > -u username
+  > parallel ssh tool to snapshot entire cluster
+
+ * To get a complete picture of your cluster at one particular time, you might want to execute this on the SAME TIME for EACH NODE (cron)
+
+
+
+
+- How do we remove snapshots
+#bin/nodetool clearsnapshot
+
+ * The #nodetool cleansnapshot command removes snapshots
+ * Same option as #nodetool command
+ * Specify the snapshot file and keyspace
+ * Not specifying a snapshot name removes all snapshots
+ * Remember to remove all snapshots before taking new ones -- previous snapshots are NOT deleted automatically
+ * To clear snapshots on all nodes at once, use a parallel ssh utility 
+
+
+
+- How do we restore snapshots ?
+ * Most common method is to delete the current data files and copy the current snapshots and the incremental files to the appropiate data directories
+  > If using incremental backups, copy the contents of the backups directory to each table directory
+  > Table schema must already be present in order to use this method
+  > Restart and repair the node after the file copying is done
+  > Snapshots works only on a SAME SIZE CLUSTER (ex. 10 nodes -> 10 snapshots -> 10 snapshots restored to 10 nodes)
+  
+ * Another method is to use the #sstableloader
+  > Great if you're loading it into a different size cluster ( 10 nodes initially -> 10 snapshots -> 10 snapshots restored on 5 nodes !!!!!)
+  > Must be careful about this as it can add significant load to the cluster while loading
+
+
+
+- Performing cluster-wide backup
+ * OpsCenter
+ 
+ * SSH programs   (for bash scripts) 
+  > pssh  (parallel ssh)
+  > clusterssh is another tool that can be used to make chages on multiple servers at the same time
+  
+ * Honorable mention - #tablesnap and #tablerestore
+  > For Cassandra backup to AWS S3 storage
+
+ * Recovery
+
+______________________________________________________________________________
+
+	
+	Multi DC
+	
+- Nodes, racks and datacenters  (because cassandra is topology aware, we have to think of things in individual places)
+  A cluster of nodes can be logically grouped as racks and datacenters
+
+  * Node - the virtual or physical host of a single Cassandra instance
+  * Rack - a logical grouping of physically related nodes (single failure domain)
+  * Data Center - a logical grouping of a set of racks
+  * Enables geographically aware read/write request routing
+  * Each node belongs to one rack in one data center
+  * The identity of each node's rack and data center may be configured in it's #conf/cassandra/rackdc.properties file (information used by the snitch to know where to put data in order not to loose it)
+  
+- Adding a second data center
+  * Ensures continuous availability of your data and aplication
+  * Live backup
+  * Improved performance
+  * Analytics (using Apache Spark on top of Cassandra)
+  
+  
+- How clusters operate between datacenters 
+  * A data center is a grouping of nodes configured together for replication purposes
+  * Data replicates across data centers automatically and transparently
+  * Consistency level can be specified at LOCAL level for read/write operations
+  * Consistency level can also be specified as EACH
+  (ex. LOCAL QUORUM or EACH QUORUM)
+
+
+- What if one data center goes down
+  * Failure of a data center will likely go unnoticed 
+  * If node/nodes fail, they will stop communicating via gossip
+  * Recovery can be accomplished with rolling Repairs to all nodes in the failed DC
+
+
+
+- Implementing a multiple DC cluster 
+  * Use the NetworkTopologyStrategy rather than SimpleStrategy
+  * Use LOCAL_* consistency levels for read/write operations to limit latency
+  * If possible, defie one rack for entire cluster
+  * Specify a snitch (!!! Snitch Module !!!)
+  
+  
+
+______________________________________________________________________________
+
+
+	Best Practices for Cluster Sizing
+
+- Cluster sizing
+  
+  * Volumes of data
+   > Estimate the volume based on your application 
+   > Data per node -> (avg amount of data per row) x (number of rows) / (no. of nodes)
+   
+
+  * Velocity of data
+   > How many writes per second
+   > How many reads per second
+   > Volume of data per operation
+   
+   
+  * Factoring in replication
+   > Multiply per node volume by Replication Factoring
+   > Example: RF=3 -> (Node volume 10G per day per node) x (RF=3) => 30G per node
+
+
+
+  * Testing limits 
+   > Use cassandra-stress to simulate workload
+   > Test production level servers
+   > Monitor to find limits (Disk is the first thing to manage/ CPU is second)
+
+
+
+ - Example sizing exercise 
+   > We estimate that KillVideo will create 100G of data per day
+   > Writes per second - 150k
+   > Reads per second - 100k
+
+  * Requireens
+   > RF=3
+   > Multiple Data Center
+   > 25ms read latency 95th percentile (SLA) 
+
+  * Testing summary
+   > Node capabilities to maintain < 25ms read
+    >> At maximum packet size, 50k writes/second
+	>> At maximum packet size, 40k read/second
+	>> 4T per node to allow compaction overhead
+
+	
+!!!!!
+	
+  * Sizing for Volume
+   > (100G per day) x (30 days) x (6 months) = 18T of data  (6 months, then we increase)
+   > (18T of data) x (RF=3) = 54T total cluster load
+   > (54T total data) / (4T max per node) = 14 node  (numbers of nodes needed)
+   > (14 nodes) x (2 data centers) = 28 nodes total
+
+
+  * Sizing for Velocity
+   > (150k writes/sec load)/ 50k writes/second load) = 3 nodes  (we got 14 nodes... so no issue)
+   > Monitor for changes over time  (Velocity might increse with time)
+   
+   
+   
+
+- When it come to mesuring READ LATENCY -> IT SHOULD BE BASED ON MAX/MIN VALUE not average
+
+
+
+______________________________________________________________________________
+
+
+	Using the cassandra-stress Tool
+
+- #cassandra-stress (Java-based stress testing utility for benchmarking and load testing a cassandra cluster)
+
+ * Use the cassandra-stress to:
+  > Quickly determine how a schema performs 
+  > Understand how your database scales
+  > Optimize your data model and settings
+  > Determine production capacity
+
+ * Newer version supports a YAML based profile that is used to define your specific schema with any potential compaction strategy
+
+
+
+- The YAML profile is split into few sections
+ * DDL - for defining your schema
+ * Column Distributions - for defining the shape and size of each column globally and wthin each partition
+ * Insert Distributions - for defining how the data is written during the stress testing
+ * DML - for defining how the data is queried during stress test
+
+
+
+- DDL
+ * Define the keyspace and table information
+ * If the schema is not defined, the stress tool will create the first time you stress o this profile
+ * If you have already created the schema separately then you only need to define the keyspace and table names
+
+
+- Column Distributions
+ * The 'columnspec' section describes the different distributions to use for each column
+ * This distributions model the size of the data in the column, number of unique values and the clustering of them within a given partition
+ * These distributions are used to auto generate data that looks like what you would see in reality 
+
+ * Possible distributions:
+  > EXP(min..max) - exponential distributions
+  > EXTREME (mon..max, shape) - An extreme value (Weibull) distribution over a range
+  > GAUSSIAN (min..max, stdvrng) - A gaussian/normal distribtion 
+  > UNIFORM
+  > FIXED  (SAME packes size for EVERY request)
+  
+
+- For each column you can specify (note the defaults):
+ * Size distribution - Defines the distribution of sizes for text,blob  set and list types (dafault: UNIFORM(4..8))
+ * Population distribution - Defines the distribution of unique values for the column values (default: UNIFORM(1..100B))
+ * Cluster distribution - Defines the distribution for the number of clustering prefixes with a given partition (default: FIXED(1))
+
+
+
+
+- Insert Distributions
+ * The insert section let you specify how data is inserted during stress
+ * For each insert operation you can specify the following distributions/ratios
+  > Partition distribution - The number of partitions to update per batch (default: FIXED(1))
+  > Select distribution ratio - ration of rows each partition should insert as the proportion the the total possible rows for the partition (as defined by the clustering distribution columns) default: FIXED(1)/1
+  > Batch type - The type of CQL batch to use. Either LOGGED or UNLOGGED (default: LOGGED)
+
+  
+  
+- DML
+ * You can specify any CQL query on the table by naming them under the query sections
+ * The 'fields' field specifies if the bind variables should be picked up from the same row or across all rows in the partition
+
+ 
+
+- Inserts
+ * "ops" is used to run a specific post from the YAML file
+#.bin/cassandra-stress user profile=./blogpost.yaml ops\(insert=1\)
+ * Without any other options stress will run our inserts starting with 4 threads and increasing them until reaches a limit
+ * All inserts are done with the native transport and prepared statements  
+ 
+ 
+ 
+- Queries ( singlepost/timeline -> NAME OF THE QUERY DEFINED IN THE YAML FILE)
+#.bin/cassandra-stress user profile=./blogpost.yaml ops\(singlepost=1\)   (execute specific query from the YAML file)
+#.bin/cassandra-stress user profile=./blogpost.yaml ops\(timeline=1\)
+ 
+ 
+- Mixed  (SYNTAX - 3 queries for every one insert)
+#.bin/cassandra-stress user profile=./blogpost.yaml ops\(singlepost=2,timeline=1,insert=1\)
+
+ 
+ 
+!!!!! Check the YAML file because it has example for each context !!!!!
+
+
+______________________________________________________________________________
+
+
+	Using the CQL COPY Command  (CQLSH command)
+
+
+- Imports and exports delimited data to and from cassandra
+
+#COPY table_name (column,....)
+FROM ( 'file_name1',... | STDIN)
+WITH option = 'value' AND ...
+
+
+
+#COPY table_name (column,....)
+TO ( 'file_name1',... | STDOUT)
+WITH option = 'value' AND ...
+
+
+- COPY uses and argument of one or more comma separated filenames
+
+- COPY FROM a delimited file (Why would we want to do this)
+ * In a prod DB, inserting columns and column values programmatically is more practical than using cqlsh
+ * But often testing queries using SQL-like shell is very convenient 
+ * A delimited file is useful if several records need inserting
+ * While not strictly an INSERT command, it is a common method for inserting data
+
+
+
+- Rules
+ * Cassandra expects every row in a delimited input to contain the same number of columns
+ * The number of columns in the delimited input is the same as number of columns in cassandra table
+ * Empty data for a column is assumed by default as NULL value
+ * COPY FROM is intended for importing small datasets (few million rows or less) into Cassandra 
+ * For importing larger datasets, use Cassandra bulk loader
+ 
+
+
+- Prodedure
+ * Locate your delimited file and check options to use
+ -----
+ lastname|firstname|date_created
+ Iorga|Alex|2018-01-01
+ .....
+ -----
+ 
+ * To insert the data, using the COPY command with delimited data
+#COPY killrvideo.users FROM 'users.csv' WITH DELIMITER='|' AND HEADER=TRUE;   (cqlsh command)
+
+
+- Just some examples
+ * DELIMITER - Set the character tat separate fields having a newline characters in the file (default is comma - ",")
+ * Header - Set to TRUE to indicate that first row of the file is a header (default is false)
+ * CHUNKSIZE - Set the size of chunks passed to worker processes (default value is 1000 - how much it reads at one time)
+ * SKIPROWS - The number of rows to skip (default value is 0)
+
+
+
+
+
+
+- COPY TO a delimited file
+
+ * Assuming you have this user table in CQLSH
+#select * from users.killrvideo;
+
+ * After inserting data into the table, you can cop the data to a delimited file in another order by specifying the column names in parentheses after the table name:
+ 
+#COPY users (lastname,firstname,created_date) TO 'users.csv';  (default csv file)
+
+
+
+
+- Specifying the source or destination file
+ * Specify the source file of the delimitet input or destination file of the delimited output by a file path
+ * You may also use the STDIN or STDOUT keywords to import from standard input or expor to standard output
+ * When using stdin, signal the end of the delimited data with a backslash and period (\.) on a separated line
+
+
+______________________________________________________________________________
+
+
+
+	Stream Data with sstableloader
+
+
+- sstableloader provides the ability to
+ > Bulk load external data into a cluster  (bulk data -> sstables)
+ > Load pre-existing SSTables into:
+  >> An existing cluster or new cluster
+  >> a cluster with the same number of nodes or a different number of nodes
+  >> A cluster with a different replication strategy or partitioner
+ > Very flexible
+ 
+ 
+
+
+- sstableloader (like sending new data in the cluster but faster)
+ > streams a set of SSTables data file to a live cluster; id does NOT simply copy the set of SSTables to every node, but transfers the relevant part of the data to each node, CONFORMING with the REPLICATION strategy of the cluster
+ 
+ > The table into which the data is loaded does not need to be empty
+
+ > If tables are repaired in a different cluster, after being loaded the tables are not repaired (reads the SSTables metadata)
+
+
+
+ 
+- Prerequisites (because sstableloader uses gossip it need to understand the topology of your cluster). Make sure of the following:
+ > The cassandra.yaml in the classpath and properly configured
+ > At least one node in the cluster is configured as seed 
+ > The following properties are properly configured in cassandra.yaml for the cluster that you are importing into:
+  >> cluster_name
+  >> listen_address
+  >> storage_port
+  >> rpc_address
+  >> rpc_port
+  
+  
+
+- How does sstableloader work
+ * When it goes, it actually reads every single SSTable and streams that data back into the cluster
+ * It repartitions the data, the snitches get involved so that the data will fall into the right place
+ * Great for switching between non-like clusters, as it can restream the data and repartition it (going from a 30 to a 40 node cluster, for example)
+ * Example of usage: To bulk load the files, specify the path to killrvdeo/users in the target cluster: 
+  
+#sstableloader -d 110.82.155.1 /var/lib/cassandra/data/killrvideo/users  (IP address of the machine you and to set it to + the name of the directory from where you will pull the SSTables from)
+  
+ * The SSTables are each read and then data is streamed into the cluster where you specified the IP. 
+  
+  
+  
+  
+  
+  
+Note(offtopic): Seed node 
+
+* Seeds are used during startup to discover the cluster.
+* The seed node designation has no purpose other than bootstrapping the gossip process for new nodes joining the cluster. 
+  Seed nodes are not a single point of failure, nor do they have any other special purpose in cluster operations beyond the bootstrapping of nodes.
+
+
+
+______________________________________________________________________________
+
+
+	Explore your SSTables with sstabledump 
+
+- sstabledump allows you to see raw data of a SSTable into text format
+ * Dumps the contents of a specified SSTable into the JSON format (also internal representation format can be used instead)
+ * Maybe you're curious abut things like timestamps
+ * Only way you can actually see the inner workings of an SSTable
+ * You may wish to flush the table (memtable) to disk (using #nodetool flush) before dumping its contents.
+
+
+
+______________________________________________________________________________
+
+	Import Data with Spark
+
+- Spark is used for Analytics (analizing data) - because it works with files so well, it can be used for data importing. Also because is a procesing framework, we can do some extra work on those files before they land in a Cassandra Table.
+
+- Spark provides convenient functionality for loading large external datasets into Cassandra tables in parallel. Ingesting files in CSV,TSV,JSON,XML,etc..
+
+- If file is stored in Cassandra File System
+ * File blocks are ingested concurrently (64 MBs per block) - data is already partitioned so it can go to multiple places at the same time -> Parallelism
+ * May still need to re-partition to optimize
+ 
+- If file is stored in a local file system, to achieve a desired level of paralelism:
+ * Use Spark to repartition the dataset or
+ * Use Spark's partitionBy to pre-partition the dataset by a Cassandra Partition Key
+
+
+______________________________________________________________________________
+
+
+	Configuring the cassandra.yaml File
+
+
+- cassandra.yaml is the MAIN CONFIGURATION file for Cassandra
+ * Located in the following directories:
+  > Cassandra package installations: /etc/cassandra
+  > Cassandra tarball installations: install_location/conf
+  
+ * Remember, must restart the node for the changes to take effect. This is not an online change !
+
+
+- Quick Start
+ * Minimal properties needed for configuring a cluster 
+  > cluster_name (default: Test Cluster) - if you are joining a custer, name MUST match
+  > listen_address (default: localhost)
+  > listen_interface (default: eth0)
+  > listen_interface_prefer_ipv6 (default: false)
+ 
+
+- Most advanced settings
+ * Storage options
+  > hinted_handoff_enables   (hinted handoff is performed when set to true)
+  > max_hint_window_in_ms    (this defines the maximum amount of time a dead host will have hints generated)
+  > data_file_directories    (location of data files)
+  > commitlog_directory      (the location of the commit log directory)
+  > row_cache_size_in_mb 	 (maximum size of row cache in memory)
+ 
+ * Communications
+  > partitioner 			(responsible for distributing groups of rows (by partition key) across the nodes in a cluster)
+  > storage_port 			(TCP prt for commands and data)
+  > broadcast_address 		(address to broadcast to other cassandra nodes)
+  
+ * Internal node configuration (like threads)
+  > concurrent_reads/concurrent_writes  (number of read/writes permitted to occur concurrently)
+  > file_cache_size_in_mb    			(maximum memory to use for pooling sstable buffers)
+  > memtable_heap_space_in_mb/memtable_offheap_space_in_mb  (total on heap and off allowance for memtables)
+ 
+ * Security
+  > authorizer   (the authentication backend. It implements Autenticator for identifying users
+  > internode_authentcatior (used to allow/dissalow connections from peer nodes)
+
+(!!!!! check Cassandra documentation from datastax to get more information about all parameters !!!!!)
+
+
+______________________________________________________________________________
+
+
+	System & Output Logs
+
+
+- System & Output logs:
+ * Simple Logging Facade for Java (SLF4J) - framework which allows for logging in Java
+ * A logback backend  (there is an XML file to edit)
+ * Los are written to the "system.log" and debug.login  (in logs directory)
+ * Configure logging programmatically or manually
+ 
+ 
+- Manual ways to configure logging
+
+ * Run the #nodetool setlogginglevel command (normal loglevel is INFO)
+#nodetool setlogginglevel
+  > used to set logging level for a service
+  > Can be used instead of modifying the logback.xml file (from conf directory)
+  > Know the NEED FOR A Restart
+#nodetool setlogginglevel org.apache.cassandra.service.StorageProxy DEBUG  (you are actually setting it on a CLASS - for more advanced users that know the open classes you what to open up) - mostly used on DEV environment 
+
+ * Configure the logback-test.xml or logback.xml file installed with cassandra
+  > contains appenders specifying where to print the log and its configuration
+  > this first appender directs log to a file  (or maybe STDOUT if you want... you can change it)
+  > the second appender directs logs to the console (STDOUT) -> great for DEV
+
+  > You can change the following logging functionality:
+    >> Rolling policy 
+    >> The policy for rolling logs over to an archive (location and name of the log file; location and name of the archive; min/max file size to trigger rolling)	
+    >> Format of the messages
+	>> Log level
+  
+  > Possible log levels ( ALL -> TRACE -> DEBUG -> INFO(default) -> WARN -> ERROR -> OFF)
+ 
+  > If tou ever want to set it to DEBUG or higher  -> USE IT ONLY FOR A SPECIFIED CLASS, otherwise you will not be able to keep up with the logging
+  
+ * Use the JConsole tool to configure logging through JMX
+
+ 
+- the #nodetool getlogginglevels command
+#nodetool getlogginglevels   (used to get the current runtime logging levels)
+
+
+
+
+- GC logging. Why is it important ?  (GC- Java Garbage Collection)
+ * The GC log is a very important tool for revealing potential improvements to a GC configuration and heap
+ * It provides exact data about its results and duration for each GC happening
+ * This information comes from the JVM and not from Cassandra (cassandra is running in a JVM)
+ 
+ * Useful flags: 
+  > -XX:+PrintGC -- Simple, prints a line for every young generation GC and every full GC
+  > -XX:+PrintGCDetails -- Detailed, young generation as well as old and perm gen
+  > -XX:+PringGCTimeStamps and -XX:+PrintGCDateStamps  -- adds time and date information to a simple or detailed GC log
+
+ * Options are set in the cassandra-env.sh  (file)
+
+
+
+______________________________________________________________________________
+
+
+	Using the nodetool Utility
+
+
+- #nodetool -> This is how you will be managing your individual nodes 
+ * A command-line interface for monitoring CASSANDRA
+ * Also used for performing routing database operations
+ * Included in the Cassandra distribution
+ * Run directly from an operational Cassandra node
+
+
+- How does it work?
+ * JMX command line wrapper (using JMX is way harder, there is no need to learn it.. just use nodetool:D)
+ * Communicates with JMX to perform operational and monitoring tasks exposed by MBeans
+ * JMX (Java Management Extensions)is a Java technology that supplies tools for managing and monitoring Java applications and services
+
+
+
+- CLUSTER related commands  (these run on a node but the EFFECT is on the CLUSTER)
+ * This has to do with working with cluster-wide information
+ * As the point-of-view of that node as it sees the state of the cluster
+
+
+- Nodetool Commands
+ 
+ * nodetool status  (get a point of view of the cluster from the node that you run this command)
+  > Provides information about the cluster, such as the state, load and IDs; (load=how much data is stored on that node)
+  > Who's up and who's down
+  > This is probably the most used nodetool command
+#nodetool <options> status <keyspace> 
+
+
+
+ * nodetool repair
+  > starts a repair process from the point of view of that node
+  > repairs one or more tables
+  > COVERED in depth in a different module ^
+#nodetool repair
+ 
+
+
+
+ * nodetool info
+  > provides node information, such as load and uptime, ID,Gossip status, Heap Memory (Used/Total),Off Heap memory,Token..etc.
+  > the status of the JVM
+  > use the "T" flag to display all tokens
+#nodetool <options> info (-T | --tokens )
+
+
+
+
+ * nodetool tpstats   (specific for a server)
+  > Provides usage statistics of thread pools
+  > How many completed, how many pending, which ones are blocked
+  > A high number of pending tasks for any pool can indicate performance problems
+  > Shows mutation drops (critical for troubleshooting a node)
+  > A heavily used command during troubleshooting 
+  > If there are Thread Pools BLOCKED or ALL-TIME BLOCKED ... this could indicate issues and have to be investigated  (block threads -> stress level increase to cassandra)
+  > DROPPED threads -> safety mechanism for cassandra when it could not do a task (insert..etc.)
+    Ex.: x number of MUTATIONS DROPPED -> means that you tried to insert x number of rows of data and it dropped them because it couldn't (INVESTIGATE)
+  
+#nodetool <options> tpstats
+
+
+
+
+ * nodetool tablehistograms (detailed information about how the tables are being accessed)
+  > Provides statistics about the table (live statistics)
+  > Includes read/write LATENCY, PARTITION SIZE (can check if you have a really big partition), column count and number of SSTables
+  > The report is incremental, not cumulative
+  > It covers all operations since the last time #nodetool tablehistograms was runned in current session
+  > The use of the metrics-core library makes the output more informative and easier to understand
+  > These statistics could be used to plot a frequency function
+#nodetool <options> tablehistograms -- <keyspace>.<table_name>
+
+
+
+
+
+ * nodetool snapshot
+  > (SNAPSHOT MUST BE PERFORMED ON ALL NODES  "maybe RF < Node_nr. or data is not consistent")
+  > Tanke a snapshot of one or more keyspaces, or of one table to backup data
+  > Cassandra flushes the node before taking a snapshot, takes the snapshot, and stores the data in the snapshots directory of each keyspace in the data directory
+  > If you do not specify the nae of the snapshot directory USING the "-t" option, Cassandra names the directory using the timestamp of the snapshot, for example 13923276283923...
+  > Covered in a different module ^
+#nodetool <options> snapshot
+
+  > Examples:
+#nodetool snapshot   (Example: All Keyspaces snapshot; default name "a timestamp" will be used for the snapshot)
+#nodetool snapshot -t 2016.06.17 killrvideo (Example: Keyspace killrvideo snapshot; name of the snapshot 2016.06.17)
+#nodetool snapshot mykeyspace killrvideo   (multiple keyspaces snapshot; default name)
+#nodetool snapshot --table users killrvideo  (snapshot one table; default name)
+#nodetool snapshot -kt cycling.cyclist_name, test.sample_times  (snapshot multiple tables in different keyspaces; -kt = keyspace.table_name; delimited by comma; default name)
+
+#cd /data/data/killrvideo/users-23sa21qe1.../snapshots/2016.06.17/
+#ls  (check the snapshots directory on each table from within data directory of the keyspace)
+
+
+
+ * nodetool clearsnapshots
+  > Remove one or more snapshots
+  > Covered in a different module ^
+#nodetool <options> clearsnapshot -t <snapshot> -- (<keyspace> ...)
+
+
+
+
+
+ * nodetool cleanup
+  > Covered in a different module ^
+  > Used to get rid of old data on nodes AFTER bootstrap operations
+  > It runs on the other nodes from the cluster besides the one that was bootstrapped; It's job is to make sure that the data that's inside those SSTables is pertinent into that particular node)
+    
+  > Deletes snapshots in one or more keyspaces (to remove ALL snapshots, OMIT the snapshot name)
+  > Not specifying a snapshot name removes all snapshots
+  > To clear all snapshots on ALL nodes at once, use parallel ssh utility
+#nodetool <options> clearsnapshot -t <snapshot> -- (<keyspace> ...)
+
+
+
+
+ * nodetool flush
+ > forces the memtables to disk
+ > this command flushes everything in the memtables out to SSTables and deletes all commit log segmets
+ > you can specify a keyspace followed by one or more tables that you want to flush from the memtableto SSTables on disk
+
+ > maybe used before you shut down a node, it will not have to re-read everyting from the commitlog because data is on disk and only small amount of data will be in memory and will have to be re-red from commit log) => SPEEDS UP THE REBOOT
+ > DRAIN is a better way because it will stop listening to operations => nothing will go into commit log and then to mem table after command is executed 
+  (have to restart cassandra process in order to bring the node up again)
+#nodetool flush
+
+
+
+ * nodetool compact
+  > FORCES a major compaction on one or more SSTables for size-tiered compaction; takes ALL your files and create a big one
+  > WARNING (DON'T DO THAT)
+  > Acts differently for different compaction strategies
+
+ 
+  > Because there are different types of compation, the compact command will act differently depending on which compaction strategy you use
+   >> Size-tiered compaction (STCS) splits repaired and unrepaired data into separate pools for separate compactions ( a major compaction generates 2 SSTables, one for each pool of data)
+   >> Leveled compation (LCS) performs size-tiered compaction on unrepaired data (after repair completes, Cassandra moves data from the set of unrepaired SSTables to L0)
+   >> Date-tiered (DTCS) splits repaired and unrepaired data into separate pools for separate compactions (a major compaction generates 2 SSTables, one for each pool of data)
+ 
+#nodetool <options> compact <keyspace> ( <table> ...)
+ 
+ 
+ 
+ 
+ * nodetool compactionstats
+  > Provide statistics about the compaction
+  > Not something you would just run all the time
+  > This is a JMX statistic you could also pull in using OpsCenter
+  > See what is currently compacting
+#nodetool <options> compactionstats -H   (the "-H" flag converts bytes to human readable form MB,GB...etc.)  
+ 
+ 
+ 
+ 
+ * nodetool proxyhistograms  (read/write latency from the coorinator point of view)
+  > Provides a histogram of network statistics
+  > The output of this command shows the full request latency recorded by the coordinator
+  > Includes the percentile rank of read/write latency values for inter-node communication
+  > Typically you use the command to see if requests encounter a slow node
+ 
+ 
+ 
+ * nodetool netstats   
+  > provide network information about the host (host based nw. info)
+  > The default host is the connected host if the user does not include a host name or IP address in the command 
+   ( you can see statistics from another node point of view by specifying the IP address of that node )
+  > Outpud includes
+   >> JVM settings
+   >> MODE: The operational mode of the node: JOINING, LEAVINGNORMAL,DECOMMISIONED,CLIENT
+   >> Read repair statistics
+   >> Attempted: The no. of successfully completed read repair operations
+   >> Mismatch(blocking): The no. of read repair operations since server restart that blocked a query
+   >> Mismatch(background): The no. of read repair operations since server restart performed in the background
+   >> Pool name: Information about client read and write requests by thread pool
+   >> Active, pending and completed number of commands and responses
+#nodetool  -h 10.171.147.128  netstats   (check the netstats ^ for the node 10.171.147.128)   
+ 
+ 
+
+- CHECK documentation for more nodetool commands 
+ 
+ 
+____________________________________________________________________________
+
+
+	Monitoring Your Cluster with OpsCenter  (to be completed in the future -> DSE specific tool)
+ 
+ 
+____________________________________________________________________________
+
+ 
+	Introduction to JMX (Java Management Extensions)
+	
+- JMX is part of the JVM, it is no apart of Cassandra, but since Cassandra runs	inside of a JVM, things you can access in JMX are statistics about running resources
+  You can also change a running Cassandra node by changing parameters inside a JMX
+  
+- JMX 
+ * Is  very complicated to use
+ * Resources represented as objects with attributes and operations
+ * Cassandra (as well as other application) uses it extensively for monitoring and user input
+
+ * The gateway to metrics (but it reqiores Java to access)
+ * Can use other things to access but still need java wrapper
+ * Been known  for having memoty leaks
+
+- When we gather metrics about Cassandra, we are using JMX. Sometimes it requires a tool to do that. Access mode is through the JMX interface
+
+	
+- There are a lot of ways to access JMX:
+ * Visual (jconsole,visualvm) - comes with JVM installer
+ * Command Line (jmxterm,jmxsh)
+ * MX4J
+ * Jolokia
+ 
+ 
+- MBeans  (JMX has MBeans=Management Beans)
+ * Inside running code of Cassandra, different things are exposed via MBeans (ex. Statistics: how many writes were done to a table? / How much memory is in the heap)
+ * [domain]:[key]=[value],[key2]=[value2]...    (interface has this parameters where there is a KEY and a VALUE that are attached to a DOMAIN)
+ * Have a domain and series of key value attributes  (each domain has a statistic..etc.; The HIGH LEVEL DOMAIN for Cassandra metrics is "org.apache.cassandra.metrics.")
+ * Under the Metrics you can find the types (orc.apache.cassandra.metrics :type=)
+  > Cache
+  > Client
+  > ClientRequest
+  > Keyspace
+  > CommitLog
+  > Compaction
+  > ThreadPool
+  ... etc.
+ 
+ * Most detailed metrics on a cassandra node ^
+
+ 
+____________________________________________________________________________
+
+
+	Leveled Compaction
+
+- Algorithm  
+  * (L0) Newly flushed memtables will go to Level 0 SSTables (L0:  [Partition_x] [Partition_y])
+   > L0 SSTables - have a default size of 160 MB -> Tunable
+   > Flushed data may exceed this limit
+   
+  * (L1)As new L0 SStables are created, they will immediately be compacted into L1 SSTables (new SSTable is created and L0 SStables are copied sequentially here)
+   > Partitions are added into L1 SSTable from L0 SSTables until MAX SIZE is reached or exceeded
+   > Partitions that overlap are copied together in the ORDER SPECIFIED in keyspace (sequential data); Partition are also ORDERED in the SSTables that are being copied to
+   > Usually the next level SSTable  has a size 10 times bigger than the previous level
+   > After a L0 SSTable have been added to L1 SSTables, the L0 SSTable is deleted => one compaction process done
+ 
+  * (L2)Same principle as L1 + more additional data added here but what is added here is available on L1 as well
+   > Reads L1 SSTables
+   > Compact the SSTables ORDERED by PARTITION KEY TOKEN and combined by OVELAPPING PARTITION KEYS    (!!!!!!)
+   (overlapping partition key in 2 SSTables => Compaction will arrange data and it can be read very fast due to the fact that is SEQUENCTIAL on the DISK)
+   > !!!!! If the L1 SSTable does NOT EXCEED the size for hos level, L2 compation will not combine them into L2 SSTable, will wait for more data to be written
+ 
+ 
+- Level Compaction is BEST for READ HEAVY workloads
+  * Occasional writes but high reads
+
+- Each partition resides in only one SSTable per level (max)
+
+- Generally reads handled by just a few SSTables
+  * Partitions group together in a handful of levels as they compact down
+  * 90% of the data resides in lowest level (due to 10x rule)
+  * Unless the lowest level is not full yet  
+ 
+ 
+- Example:
+  * L1: 1,6 G     (highest level)
+  * L2: 16G      (1,6GB x 10)  - lower level compared to L0
+  * L3: 160G     (16GB x 10)
+  * L4 1.6T      ...  (lowest level)
+  
+  * L1 + L2 + L3 = 177,600GB
+  * 177,600 GB / 1.6T ~=10%  
+  
+  
+  
+- Disk Usage:   (great read speeds and less disk usage)
+  * In general, an SSTable in one level overlaps 10(ish) SSTabbles in the level below
+  * Therefore, compaction requires 11xSStable max size to compact
+  * One for the SSTable in higher level, 10 for the overlapped SSTables in the next level (ex: 160GB = 10x16G + 15.99 GB)
+  
+  * !!! USEFULL: Wastes a lot less disk space !!!
+  * Obsolete records compact out quickly
+   > A single partition's records group as they compact down
+   > Updated records merge with older records due to this grouping
+ 
+
+
+
+- Disadvantages 
+  * Lot of compaction. IO intensive
+  * Compacts many more SSTables at once over size tiered compaction
+  * Compacts more frequently than size tiered
+  * Can't ingest data at high insert speeds  (good for reads though :D)
+
+
+- Lagging Behind
+  * Leveled compaction switches to "size tiered compaction"" at level 0 when compaction is behind
+  * Create larger L0 SSTables to compact with lower levels
+  * More optimal to compact a larger L0 SSTable to lower levels
+  * Reduces no. of SStables required for a read
+  
+______________________________________________________________________________
+
+
+
+	Size Tiered Compaction
+
+- Is set on TABLE LEVEL
+- Awesome for high write environments
+(!!!!!!!!!!!)
+- The idea here is to trigger compaction when we have enough (four by default) similarly sized SSTables	
+- In this manner, we have several size tiers (small sstables, large sstables, even-larger sstables, etc.) and in each tier we have roughly the same number of files; When one tier is full, we merge all its tables to one table in the next tier.
+- Very "cold" (hardly read) SSTables are omitted from consideration - they are not worth bothering with since the main purpose of compaction is to improve read performance 
+-  At least 4, and no more than 32, SSTables in the same bucket are considered for compaction (this 4 and 32 are per-table parameters: getMinimumCompactionThreshold(), getMaximumCompactionThreshold()).
+(!!!!!!!!!!!)
+
+
+- Example (with round numbers ..)
+1. Initial Flow
+
+ * Let consider that we have 4 SSTables of 100 MB each (will not be the case, size varies a lot)
+ 
+ * Compactor (Size-Tier Compactor) will combine this SSTables into one 400 MB SSTable (after being combined, compactor will delete old SSTables)
+ * Compactor will combine this kind of SSTables until we reach 4 SSTables of 400 MB 
+
+ * Compactor will then combine those 4 SSTables into one SSTable of 1600 MB (old SSTables deleted upon completion)
+ * Four more 1600 SSTables will be created following the process above
+ 
+ * Compactor will combine those 4 SSTables into one 6.4 GB SSTable ( in absolute worst scenario, it will require 50% of your DISK to be FREE)
+
+ * !!! Problem with this compaction is that a partition will be in a lot of SSTbales (some compacted some not)
+ * SSTables size can vary a lot (mostly due to tombstones). COmpaction is performed on SSTables from the same TIER
+
+
+2. Separating SSTables into Buckets/Tiers   (tier=bucket)
+ * Size tier compaction considers each SStable one at a time (IN NO PARTICULAR ORDER) 
+ 
+ * We consider first SSTable an 100 MB SSTable. Since this is the first one, we will create a NEW TIER.
+ * From there, will be calculated the average size of ALL SSTables in this tier (for us is 100MB)
+ 
+ * Min $ Max will be calculated for all SSTables wich will be placed in this tier  (Min = 50% of avg. = 50MB; Max = 150% of avg. = 150MB). 
+  (!!! This can be TUNED from TABLE DEFINITION using "bucket_low" and "bucket_high" parameters !!!)
+  
+  
+ * Now we get a 1 GB SSTable flushed. Since 1 GB is greater than 150MB, we have to create another bucket.
+ * Calculate Min/Max for this bucket (500MB & 1.5GB)
+
+ 
+ * We got a net 490MB SSTable... it does not go in any of the buckets => we create a new bucket 
+ * Min = 245MB / Max = 745 MB
+ 
+ 
+ * We receive a new 20MB SSTable, since it cannot go in any of the tears, the SSTable will go into a new bucket/tier
+ * The new bucket will not have Min value, all SSTables less than 50MB will go into this bucket (50 MB by default, can be configured by setting the MINIMUM SSTABLES SIZE)
+ 
+ 
+ * We receive a new 300 MB file, we can store in bucket with AVG=490. 
+  (!!! After the SSTable has been added, the AVG will be RECALCULATED !!!)
+ * After recalculation, new average will be 395 with 197 MIN and 592 MAX.
+
+ 
+ * The process will continue constantly, and AVG/MIN/MAX will be updated EVERY time a new SSTable will be added to the tier/bucket
+
+ * Compaction is performed on Buckets with the number of SSTables between min_treshold = 4 and max_treshold=32 (defaults) by considering hotness of SSTable and the reaching of bucket max_treshold.
+
+ 
+- Things to note 
+ * Groups similarly sized tables together
+ * Tier with less than "min_treshold" (four) SSTables are not considered for compaction
+ * The smaller the SSTables, the "thinner" the distance between "min_treshold" and "max_treshold" 
+ * SSTables qualifying for more than one tier distribute randomly amongst buckets
+ * Buckets with more than "max_treshold" SStables are trimmed to just that many SSTables
+  > 32 by default 
+  > Coldest SSTables dropped  (dropped -> not considered for compaction)
+  
+  
+- Hotness 
+ * !!!!! Size tiered compaction CHOSES the HOTTEST tier FIRST to COMPACT
+ * SSTable hotness determined by number of reads per second per partition key
+ 
+ 
+- Similar Sized SSTables
+ * Similar sized SSTables compact better together
+ * SSTables of similar size will have a fair alunt of overlap
+ * Minimizes writes amplification (rewriting large amounts of data simply to copy it)
+ * Ex. Compacting a 1MB file with a 1TB file (NOT IDEAL)
+ 
+ 
+ 
+- Concurrency
+ * Cassandra  compacts several tiers concurrently
+ * "concurrent_compactors" in YAML file - Default to smaller number of disks or number of cores; with a minimum of 2 or maximum of 8 per CPU core
+ * Tables concurrently compacting are not considered for new tiers
+ 
+ 
+ 
+- Triggering a Compaction
+ * Compaction starts every time a MemTable flushes to an SSTable (MemTable too large, commit log to large or manual flush)
+ * Or when a cluster streams SSTable segments to the node (Bootstrap, rebuild,repair)
+ * Compaction continues until there are no more tiers with with at least "min_treshold" tables in it
+ 
+
+
+
+- Tombstones
+ * If no eligible buckets, size tiered compaction compacts a single SSTable
+ * This eliminates expired tombstones
+ * The number of expired tombstones must be above 20%
+ * Largest SSTable chosen first
+ * Tabale must be at least one day old before considered
+   ("tombstone_compaction_interval" parameter in YAML)
+ * Compaction ensures that tombstones DO NOT overlap old records in other SSTables
+
+
+
+- Size Tiered Compaction
+ * As with everything, there's trade offs to using size tiered compaction
+ * Size tiered compaction is the default
+ * Absorbs high write-heavy workloads by procrastinating compaction as long as possible
+ * Other compaction strategies don;t handrle ingesting data as well as size-tiered compaction
+ * "compaction_throughput_mb_per_second" controls the compaction IO load on a node  (you can set it with #nodetool setcompactionthroughput command)
+
+
+
+- Major Compations
+ * You can issue a major compaction via nodetool
+ * Compacts all SSTables into a single SSTable
+ * New monolithic SSTable will qualify for the largest tier
+ * Future updates/deletes will be into smaller tieres  (!!!)
+ * Data is largest tier will become obsolete yet still hog a of disk space
+ * Takes a long time for changes to propagate up to large tier
+ * Major compactions are NOT recommended  (only way out of it is sstablesplit)
+
+
+____________________________________________________________________________
+
+
+
+	Time Windowed Compaction
+
+- Example
+
+ * We will consider the time from 03:00 - 04:00 PM 
+ 
+ * From 03:00 PM to 04:00 PM we get 3 SSTables. The SSTables from that period of time (03:00 - 04:00 PM) will be compacted (using size-tier compaction) into one SSTable
+ 
+ * From 04:00 PM to 05:00 PM we get 4 SStables, 1 Bigger and 3 small ones "same tier". All 4 SSTables from 04:00 to 05:00 will be compacted into one SSTable.
+
+ * So on so forth (05:00 to 06:00; ....)
+
+ * For a Video site, the final SSTable size(for a period of time)  will follow a similar trace during the day (user activity will be higher in daytime)
+
+ * The same bucket will be used the next days for the same time window (good to max out at 20/30 SSTables per bucket)
+ 
+- Time Window Details
+ * An SSTable spanning two windows simply falls into the SECOND window
+ * Good practice to aim for 50ish max SSTables on a disk
+   > 20ish for active window  (20 files inside a bucket)
+   > 30ish for past windows combined (30 files isnide a bucket)
+ * For example: one month of data would have window of a day
+
+
+ 
+- Tuning (Simply set the window time size)
+ * compation_window_unit
+  > minutes
+  > hours
+  > days
+  
+ * compation_window_size
+  > Number of units in each row
+  
+ * Ex: 15 days, 10 minutes, 20 hours..etc
+ 
+ 
+ * expired_sstable_check_frequency  - when to look for expired tombstones (determines how often to check for FULLY EXPIRED (tombstoned) SSTables)   -> Good to tune when using TTL 
+
+
+
+
+
+____________________________________________________________________________
+
+	
+	
+	JVM Settings
+	
+- Garbage collection (GC) is a form of automatic memory management. The garbage collector, or just collector, attempts to reclaim garbage, or memory occupied by objects that are no longer in use by the program.
+	
+- Level Set 
+ * Cassandra is a server written in Java. Java has a language 
+ * In a virtual machine that runs on top of your OS, which will run java bytecode
+ * Therefore when your server process is running, it's running it's running inside a JVM (Java Virtual Machine) and compiled by code
+ * And inside of that virtual machine there's a CPU and memory
+ * That memory inside the virtual machine is in heap - that heap is what we have to manage because this is what will cause the most trouble
+ * Heap: an area of memory used for dynamic memory allocation
+ * Most of the JVM settings are about managing the heap
+ * A big part of that is garbage collection (GC)
+ 
+- Files from cassandra config wich have JVM settings in them
+ * cassandra-env.sh  (control environment settings, such as JVM configuration settings, for Cassandra and also JMX options)
+  > MAX_HEAP_SIZE to not more than 8GB
+   >> Large heaps can introduce GC pauses that lead to latency
+   >> different workloads can justify different settings
+   
+  > HEAP_NEWSIZE to 100MB/core
+   >> 8 cores would mean 800MB
+   >> The larger this is, the longer GC pause times will be. The shorter it is, the mre expensive GC will be
+   >> different workloads may react differently
+  (do not really change without experience, you can mess up your system easily)
+
+!!!!!
+The HEAP settings sizing (from above) are set automatically by a script based on a formula: 
+"System memory < 2GB => 1/2* system memory"
+"System memory: 2GB - 4GB => 1 GB
+"System memory: > 4GB => 1/4 system memory but no more than 8GB
+!!!!!  
+  
+ * jvm.options
+   > Garbage collection settings
+ WARNING: This is something you do not touch until you need to. These settings are baked in there for a reason from years of experience. Before you make a change, know why you;re doing it.
+
+
+
+- Tuning the Java heap (don't turn java heap size too high)
+ * Capability of Java to gracefully handle Garbage Collection above 8GB quickly diminishes
+ * May interfere with OS's ability to maintain OS page cache for requently accessed data
+ * With increased heap size, eventually what might happen is that you will have really large GC events. And Garbace Collection is of course the killer of JVM process, it will stop everything from running
+
+
+ * There are different parts of the JVM memoty, but the one that we wanna manage is the "old gen" or the bigger part of the memory. There are different systems in place inside of JVM that do this:
+  > Concurrent-Mark-Sweeps (CMS) garbage collector 
+   >> Default
+   >> Meant to be the lowest latency garbace collector
+ 
+  > G1 (newer an d more popular)
+   >> better than CMS for larger heaps
+   >> goes for regions of heap with most garbace first
+   >> compacts the heap on the go
+
+  > Garbage collection is configured in conf/jvm.options.If you want to run G1:
+   >> open $CASSANDRA_HOME/conf/jvm.options
+   >> comment out all lines in the #CMS Settings section
+   >> Uncomment the relevant G1 settings in the #G1 Settings section
+
+
+
+- JMX options 
+ * JMX is a Java technology that supplies tools for managing and monitoring java application services
+ * You can modify the following properties in the cassandra-env.sh file to configure JMX to listen on port 7199 without authentication
+
+ * Options:
+  > com.sun.management.jmxremote.port  (the port on which Cassandra listens for JMX connections)
+  > com.sun.management.jmxremote.ssl  (enable/disable SSL for JMX)
+  > com.sun.management.jmxremote.authenticate  (enable/disable remote authentication for JMX)
+  > -Djava.rmi.server.hostname (Sets the interface hostname or IP that JMX should use to connect. Uncomment and set if you have trouble connecting)
+  
+  
+_____________________________________________________________________________
+
+
+	
+	Understanding Garbage Collection
+	
+- Garbage collection is a process "cleanup" that a JVM is undergoing all the time to clear out any processes that are not live
+ > Objects are moved and deleted to free up memory
+ > GC should happen often enough to create larger "holes" of free memory, but not so often that the CPU is churning on GC all the time
+ > !!! In casssandra there are a lot of objects created and cleaning up is very important
+ 
+- Since Cassandra runs in a JVM, the pauses to do garbage collection affects Cassandra's performance
+ > Sizing the JVM is important to performance
+ > The number of CPUs can also affect performance
+
+
+
+- What to consider when tunning garbage collection 
+ * Pause time
+  > length of time the collector stops the application while it frees up memory
+  
+ * Throughput (how much memory cna you clean up on one shot)
+  > Determined by how often the garbage collection runs, and pauses the application
+  > More often the collector runs, the lower he throughput
+
+ * We want to minimize length of pauses as well as frequency of collection
+
+- JVM available memory  (New gen is rarely touched)
+ * Permanent Generation 
+ 
+ 
+ * New generation (ParNew) -> where all the  things happen, ex. a new object in java 
+   > HEAP_NEWSIZE in cassandra-env.sh   (lowers the amount of latency in your application -> ONLY if you 100% know what you;re doing)
+   
+   > Broken up in newgen spaces     (EDEN -> S0 -> S1)
+    >> Eden    (first they start here)
+	>> 2 survivor spaces  (comes here through a series of "promotions")
+   (promotions = if it stays alive, meaning that is still an object in the memory that is being used; the more is used the more is getting promoted from Eden to S0, S1... until eventually it turns into Old Generation)
+   
+   > It can fill up with new objects, a minor GC is triggered if that is the case
+   > A minor GC stops execution, iterates over objects in Eden, copies any objects that are not (yet) garbage to active survivor pace and clears eden (cassandra -> lots reads/writes -> potentially lots of new objects that are not needed immediatly after -> useful procedure)
+   > If the minor GC has filled up the active survivior space, it performs the same process on survivor space
+   > Objects that are still active are moved to the other survivor space and the old survivor space is cleared
+   
+   > ParNew collection of new generation  (Type of garbage collection -> minor GC)
+    >> How long it took to cleanup that memory (measured in seconds); the mount of ms here meants that this much time your application was offline
+    >> It's a stop the word algorithm
+	>> Finding and removing garbage is fast, moving active objects from eden to survivor spaces , or from the survivor spaces to th old gen , is slow
+   
+   
+ * Old generation (CMS) -> where the new things get promoted if they are still needed
+  > this needs to be managed because it can grow largely over time
+  > largest piece of a JVM memory
+  > contains objects that have survived long enough to not be collected by a "MINNOR GC"
+  > The CMS collector is run when 75% full  (once enough objects are created, a cleanup is necessary)
+  > Persistent data in memory (MEMTABLES are hold here)
+
+(minor GC "ParNew" runs on New Gen; GC "CMS or G1" runs on Old Gen; Full GC runs on both New Gen and Old Gen`)
+
+ 
+- Full GC
+ * Multi-second CG pauses = Major collections happening (wanna protect against this -> executed when the JVM can't handle the objects from the memory anymore)
+ * If the old gen fills up before the CMS collector can finish, the application is paused while  a full GC is runned 
+ * Full GC checks everything: new gen, old gen and perm gen
+ * Significant (multi-second) pauses -> node can be down few seconds -> NEEDS INVESTIGATION IN REGARDS TO WHY IT HAPPENS`
+
+
+
+____________________________________________________________________________
+
+	JVM Heap Dumps
+	
+- Useful when troubleshooting high memory utilization or OutOfMemoryErrors 
+- Show exactly which object are consuming most of the heap
+- Cassandra starts Java with the option -XX:+HeapDumpOnOutOfMemoryErrors  (default) so when you get OutOfMemoryErrors, it will create that heap dump
+
+
+- By default, Cassandra puts the file in a subdirectory of the working, root directory when running as a service 
+- BUT !!!
+ > If Cassandra does not have write permissions to the root directory, the heap dump fails
+ > If the root directory is too small to accommodate the heap dump, the server crashes
+
+- Configuring HEap Dump directory (to avoid encountering issues from above)-> not best practice...depends on the use case
+ > Open the "cassamdra-env.sh" file
+ 1. Disable the default HeapDumpOnOutOfMemoryErrors  
+ 2. Change the directory of the heap dump file to avoid server crash:
+  "set jvm HeapDumpPath with CASSANDRA_HEAPDUMP_DIR"   (scroll to here)
+  "set jvm HeapDumpPath with CASSANDRA_HEAPDUMP_DIR CASSANDRA_HEAPDUMP_DIR =<path>
+
+
+  
+- Manual Heap Dumps using jmap  
+ * First you need to get the PID of the JVM process
+#sudo -u <user> jmap -dump:file=heapdump.hprof,format=b pid
+
+
+- Analyzing Heap Dumps:
+ * Eclipse Memory Analyzer Tool (MAT)
+
+
+__________________________________________________________________________
+
+
+	JVM Profiling (is about discovering issues with the JVM)
+	
+
+- How do we discover issues with the JVM
+ * nodetool tpstats
+  > nodetool tpstats is built around the idea of Stage Event Driven Architecture (SEDA).
+  > Staged Event Driven Architecture (SEDA) - thread pool that do different things (cassandra is build around SEDA architecture)
+  > Tasks are separated into stages that are connected by a messaging service
+  > Some stages skip the messaging service and queue tasks immediately on the different stage if exists on the same node
+  
+  > outputs (Thread pool name, Active threads, Pending threads Completed threads, Blocked threads, All time blocked threads)
+    Example of stages (Mutation stage, Gossip stage..etc); Mutation=change to the drift
+  
+  > lookout for blocked threads, this might indicate issues 
+  
+ * OpsCenter
+  > Keeps track of your memory (heap used/heap max..etc.)
+  > JVM Collection count for both ParNew and CMS
+  > JVM Collection time for both ParNew and CMS
+  > Heap Max, Heap Used, Heap Committed
+  > Number of pending tasks --drill down for more information
+  
+ * JMX Clients
+  > jconsole
+  > visualvm
+  
+__________________________________________________________________________
+
+ 
+	Importance of Time Sync
+
+- Time Stamp Counter (TSC) is the most common clock source-- potentially unstable
+- The clocks an all nodes should be synchronized (very important in a distributed architecture)
+- You can use NTP or other methods  (NTP is kinda mandatory)
+
+- In a system consistent system like cassandra, where the timestamp is the way to determine if the data is new nor not (last write wins=when you write an update, is gonna know which one wins based on a TIMESTAMP)
+  (If you have 2 unsynced systems "ie. node1 is 10 minutes apart from node2", if you did a write on a node between that 10 minute window you have a potential dataloss situation that is based on the time)
+ 
+ 
+__________________________________________________________________________
+
+	Configuring the Kernel
+ 
+ 
+- We need tu look at ulimit (user limits) in order to not allow users to take too many resources from our system
+
+- limits.conf (user resource limits)
+#ulimit -a   (view current limits)
+
+ * Single-user systems such as database servers have little use for this limitations (we can turn them off globally)   
+ *  Also in this file we can give unlimited resources to the cassandra user 
+
+
+- sysctl.conf 
+ * should change the swap settings so that we DON'T use swap 
+ * always disable swap
+#swapoff -a
+
+ * Remove all swap files from /etc/fstab
+#sed -i 's/^\(.*swap\)/#\1/' /etc/fstab
+
+ * If you absolutely have to use swap (use swapiness=1 in sysctl.conf file)
+#vm.swapiness = 1 
+
+
+ * Changing Network Kernel Settings  (suggested for database servers communicating with other databases..etc)
+net.ipv4.ip_local_port_range = 10000 65535
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_rmrm = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 87380 16777216
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.netdev_max_backlog = 2500
+net.core.somaxconn = 65000
+ 
+__________________________________________________________________________
+
+ 
+	Useful Linux Observation Tools
+ 
+- dstat (shows all system resources instantly)
+#dstat -lrvn 10  (-l load average; -r disk IOPS/throughput , -v vmstats, -n network throughput 
+
+ * If you observe overloaded CPU...you should use #nodetool tpstats to investigate what stresses the node
+
+
+
+- htop  (similar to top but with more details regarding CPU statistics)
+ * Shows the ammount of threads per core
+ * Better for multi-core CPU systems   (displays statistics per core)
+ 
+ 
+- iostat  
+ * Most important statistic is "await" -> how much time does it take to do something (that wait time to do a seek)
+ * If "await > 20 ms" => that note will have troubles running cassandra
+
+__________________________________________________________________________
+
+	Hardware Selection (check last 5 chapters for more advanced knowledge about hardware -> below is just a simple summary)
+
+- AVOID  (any kind of attached storage -> they create lots of latency)
+ * SAN storage 
+ * NAS devices
+ * NFS    
+	
+	
+- Memory 
+ * Min 8GB on Prod
+ * Min 4GB for Dev 
+ * More memory = better read performance
+ * More RAM = memtables hold more recently written data 
+ 
+ 
+- Disks 
+ * SSDs
+  > provide extremely low latency response times for random reads while supplying ample sequential writes
+  > Have no moving parts to fail
+ 
+__________________________________________________________________________
+
+	Cassandra Ports
+
+- Configuring firewall port access
+
+* If you have a firewall running on the nodes in your Cassandra cluster, you must open up the following ports to allow communication between the nodes, including certain Cassandra ports. 
+  If this isn’t done, when you start Cassandra on a node, the node acts as a standalone database server rather than joining the database cluster.
+
+
+Public ports Port number 			Description
+22 									SSH port
+8888 								OpsCenter website. The opscenterd daemon listens on this port for HTTP requests coming directly from the browser.
+Cassandra inter-node ports Port number 	Description
+7000 								Cassandra inter-node cluster communication.
+7001 								Cassandra SSL inter-node cluster communication.
+7199 								Cassandra JMX monitoring port.
+Cassandra client ports Port number 	Description
+9042 								Cassandra client port.
+9160 								Cassandra client port (Thrift).
+Cassandra OpsCenter ports Port number 	Description
+61620 								OpsCenter monitoring port. The opscenterd daemon listens on this port for TCP traffic coming from the agent.
+61621 								OpsCenter agent port. The agents listen on this port for SSL traffic initiated by OpsCenter.
+
+
+

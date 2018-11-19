@@ -1,0 +1,262 @@
+
+
+	Relational Overview
+
+* Medium Data
+  - Fits on 1 machine
+  - RDBMS(Relational Ddatabase Mgmt. System)  is fine  (postgres/mysql)
+  - Supports hundreads of concurrent users
+  - ACID guarantees (Atomicity, Consistency, Isolation, Durability)
+  - Scales vertically
+  
+* Can a RDBMS work for Big data
+  - Replication: ACID is a lie (data is replicated asynchronously   - reads on the slaves may contain old data "slave has delay compared to master") - Galera cluster is synchronous
+  
+
+
+(to be added from Notepad at work)
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________________________________________________
+	Apache Cassandra Overview
+
+* Apache Cassandra is a fast, distributed database built for 
+  - High Availability 
+  - Linear Scalability
+  - Predictable Performance
+  - Multi DC  (peer to peer technology, there is no master-slave, no leader election..etc.; Can withstand a whole DC failure)
+  - Commodity Hardware
+  - Easy to manage operationally
+  - Not a drop in replacement for RDBMS
+
+
+
+* Conceptually cassandra is like a giant Hash Ring
+  - No master/slave/replica sets
+  - No config servers, zookeepers
+  - Data is partitioned around the ring
+  - Data is replicated to RF(replication factor)=N servers   (data is replicated to multiple servers, all of that servers are equal -> any node in the cluster can service any read/write requests for the cluster)
+  - All nodes hold data and can answer queries (both reads & writes)
+  - Location of data on ring is determined by partition key (part of the PRIMARY KEY,the PARTITION KEY is what is actually used when you insert data into cassandra, the value of that partition key is runned through a consistent hashing function
+															and depending on the output we can determine which range of hashes that value fits into and thus, which node we need to go talk to actually distribute the data around the cluster)
+
+
+
+
+
+* CAP Tradeoffs
+  - CAP Theorem = During network partition (computers can't talk to each other) you can either chose CONSISTENCY either HIGH AVAILABILITY
+     > Consistency  (if the machines can't talk with each other, the system will appear as down, therefore data remains consistent to both machines)
+	 > High availability (what Cassandra choses -> the machines, even if they can't talk with each other, they will still respond to reads and uldate tables ...etc.)  -> an most of scenarios, better due to no downtime
+     (also from datacenter to datacenter, is impractical to try the consistency; we want to asynchronously replicate our data from one DC to another because it takes way too long to transfer the data from one DC to another)
+   
+
+	
+* Replication 
+  - Data is replicated automatically
+  - You pick number of servers called "replication factor" or RF  (Ex. RF=3 -> I write to node A => data is replicated also to node B and node C; in total the data can be found in 3 nodes)
+    You set the RF when you configure a keyspace(collection of tables, similar to schema in ORACLE or DB in MySQL)
+  - Data is ALWAYS replicated to each replica (Replication happens Asynchronusly)
+  - If a machine is down, missing data is replayed via hinted handoff  (If a machine goes down while this replication is suppose to go on, whatever node you happen to be talking to is going to save what's called a HINT
+																		and Cassandra uses something called Hinted handoffs to be able to replay all the writes that were missed when that node comes back up and rejoins the cluster)
+
+	
+* Consistency Levels  (how many replicas do I need to hear/get confirmation that data was written, when I do a read/write for that read/write to be considered successful)
+ - Per query consistency (CONSISTENCY LEVEL is set on a PER-QUERY BASIS  -> Consistency levels and be used by Developers when creating the queries; just have to mention before the query list #CONSISTENCY consistency_type)
+ - Consistency types: ALL, QUORUM, ONE  (most popular ONE and QUORUM)
+	> ONE     (means that I need to hear/get ACK that data is written (SELECT/UPDATE) only from one replica)
+	          (Ex. Write data to node A, node A sends ACK that data is written and also updates the node B and C "considering that we are running with RF=3")
+			
+	> QUORUM  (means the MAJORITY of replicas -> in the case of RF=3, we need to write on 2 nodes ">50%", then we can confirm to the client that the data has been written to DB)
+		      (Ex. Client sends data to node A, node A writes data on istelf and then on node B, "get confirmation from node B", then confirmation is sent from node A to the client that the data was written to DB)
+	
+ - How many replicas for query to respond OK
+
+ - A consistency level will how fast will the data be read/written from the DB  (lower consistency leved "ONE" and get higher speed)
+ - A consistency level will also impact your availability (higher consistency level, I have to hear/talk to more nodes => more nodes have to be online to acknowledge reads/writes -> less tolerant to nodes going down)
+
+
+
+
+* Multi DC  (asynchronus replications makes it really easy to use replication across multiple DCs)
+  - Typical usage: clients write to local DC, replicates async to other DC
+    > Consistency levels can  then also be used locally as: LOCAL-ONE or LOCAL-QUORUM
+	> After the data is written in the initial DC and client receives the ACK (LOCAL-CONSISTENCY-LEVELS), Data is then replicated asynchronous to the other DCs around the world  => Super HIGH AVAILABILITY (even if a whole DC fails)
+    > EX.: Client writes on node A1 from DC1, data is replicated to other 2 nodes B1 and C1, Client receives ACK -> Data from node A1 is replicated to node A2 from DC2, node A2 replicates the data to node B2 and C2
+ 
+  - Replication factor per keyspace per datacenter  (so you can have one keyspace that has 5 replicas and one that has 3,1,....etc.)
+
+  - Datacenter can be physical and logical 
+
+
+______________________________________________________________________________________________________________________________________________________________________________________________________________________________________
+
+	Chosing a distribution
+
+* Cassandra Reads and Writes
+ - The Write Path
+  > Writes are written to any node in the cluster (coordinator) 
+    >> Any given node can service a write requests (the node you are talking with is called the coordination node because he will coordinate with other nodes in the cluster for that write)
+	>> Coodrinator is not a special node, all nodes are equal in Cassandra. He will only coordinate in regards to a particular write requests
+	
+! > Writes are written to COMMIT LOG then to MEMTABLE
+    >> Commit Log is an append only data structure -> doing sequential IO => very fast IO
+	>> MEMTable  -> In Memory representation of your data`
+	>> After it was written in the MEMTABLE Cassandra can respond  that data is written
+  
+  > Every write includes a timestamp (every time you do a write in Cassandra, every column that you write GETS A TIMESTAMP)  
+ 
+  > MEMTABLE flushed to disk periodically (sstable) (Cassandra does this behind  the scenes, Asynchronusly at times to not cause high memory usage)
+    >> SSTable -> Takes the in-memory representation of the data and serialize it on the disk (once the MEMTABLE is full)
+	
+  > Deletes are a special write case, called a "tombstone" 
+   >> Because SStable and Commit log are immutable, Cassandra does not do Updates or Deletes. Instead, it writes a special kind of record called a tombstone
+   >> A marker in a row that indicates a column was deleted. 
+  
+
+  > What is an SSTable
+   >> Immutabe data file for row storage
+   >> Every Write include a timestamp of when it was written
+   >> Partition is spread across multiple SSTables
+   >> Same column can be in multiple SSTables
+   >> Merged through compaction, only latest timestamp is kept - if a write is performed on a row  (COMPACTION takes small SSTables and merges the into bigger ones)
+   >> Deletes are written as tombstones
+   >> Easy backups!  (whenever a SSTable is written on the disk, you can just copy it and you're good to go)
+
+
+
+
+  
+ - The READ path
+  > Any server may be queried, it acts like a coordinator
+  > Contact nodes withe the requested key
+  > On each node, data is pulled in the memory from the SSTables and merged (data might be on multiple SSTable), data is also checked int the MEMTABLE -> Latest Timestamp/row always wins
+   >> The Type of storage hardware will impact Cassandra's performance
+   >> Compaction frequency also impacts the performance (figh freq => less file that cassandra has to look up into for your data)
+
+
+  > Consistency < ALL performs read & repair in the background (read_repair_chance)
+   >> nodes might not have the latest updated data => READ_REPAIR_CHANCE -> whenever you do a read against Cassandra  is going to go and try to talk to all the replicas in the cluster and make sure that eerybody has the latest data (default is 10%  -> 10% of all reads, cassandra will do this on your behalf)
+
+
+
+
+
+   
+ - Picking a Distribution
+  > Open Source (Apache Cassandra Open Source)
+   >> Latest bleeding edge features
+   >> File JIRAs
+   >> Support via mailing list & IRC
+   >> Fix bugs
+   >> cassandra.apache.org
+   >> Perfect for hacking 
+   
+   
+  > DataStax Enterprse (core of Apache Cassandra Open Source)
+   >> Intgrated Multi-DC Search
+   >> Integrated  Spark for Analytics
+   >> Focused on stable releases for enterprise 
+   >> Included on USB
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
